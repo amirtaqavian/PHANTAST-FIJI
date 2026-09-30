@@ -4,6 +4,14 @@
 
 This version builds on the original PHANTAST segmentation workflow and introduces additional features focused on **live detection, image adjustment, and easier Region of Interest (ROI) selection**.
 
+## Getting Started
+
+Download the latest version of **PHANTAST_Live** from the release page:
+
+**[Download PHANTAST_Live](https://github.com/amirtaqavian/PHANTAST-FIJI/releases)**
+
+After downloading, install the plugin in **Fiji/ImageJ** and start using PHANTAST_Live for phase-contrast microscopy image analysis.
+
 ## What's New
 
 ### Live Detection
@@ -16,7 +24,7 @@ This version builds on the original PHANTAST segmentation workflow and introduce
 
 * Added image adjustment functionality to make preprocessing easier.
 * Users can modify the image before running detection to obtain more suitable segmentation results.
-* This provides greater control when working with images that have different contrast, brightness, or background characteristics.
+* Provides greater control when working with images with different contrast, brightness, or background characteristics.
 
 ### Easier ROI Selection
 
@@ -30,14 +38,6 @@ The original PHANTAST was developed to provide automated segmentation and quanti
 
 **PHANTAST_Live extends this workflow by making the analysis more interactive**, allowing users to adjust the input image and ROI while directly observing the resulting detection.
 
-## Original PHANTAST
-
-PHANTAST was originally developed at **University College London (UCL)** and the **CoMPLEX** research centre.
-
-This repository is a **fork and modified version of the original PHANTAST-FIJI project**. The original PHANTAST project, algorithms, documentation, and publications remain credited to their respective authors.
-
-For information about the original project, please visit the original PHANTAST-FIJI repository.
-
 ## Main Changes
 
 | Feature                           | Original PHANTAST | PHANTAST_Live |
@@ -49,6 +49,7 @@ For information about the original project, please visit the original PHANTAST-F
 | Interactive image adjustment      | Limited           | ✓             |
 | Easier ROI selection              | Limited           | ✓             |
 | Interactive analysis workflow     | —                 | ✓             |
+
 
 ## Note
 
