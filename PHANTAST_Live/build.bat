@@ -1,5 +1,5 @@
 @echo off
-rem Builds PHANTAST_Live-1.0.jar with the Java compiler and ImageJ library that come with Fiji.
+rem Builds PHANTAST_Live-1.1.jar with the Java compiler and ImageJ library that come with Fiji.
 rem Usage:  build.bat "C:\path\to\Fiji"
 setlocal
 
@@ -38,7 +38,7 @@ echo Compiling with %JAVAC%
 copy /y "%HERE%plugins.config" "%OUT%\" >nul
 copy /y "%HERE%src\PHANTAST_Live.java" "%OUT%\" >nul
 if exist "%HERE%..\LICENSE" copy /y "%HERE%..\LICENSE" "%OUT%\LICENSE.txt" >nul
-"%JAR%" cf "%HERE%PHANTAST_Live-1.0.jar" -C "%OUT%" . || exit /b 1
+"%JAR%" cf "%HERE%PHANTAST_Live-1.1.jar" -C "%OUT%" . || exit /b 1
 
-echo Built %HERE%PHANTAST_Live-1.0.jar
+echo Built %HERE%PHANTAST_Live-1.1.jar
 echo Copy it into "%FIJI%\plugins" and restart Fiji.

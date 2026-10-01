@@ -199,6 +199,7 @@ public class PHANTAST_Live implements PlugIn {
     private JLabel appliedLabel;
     private JLabel editsLabel;
     private JLabel areaLabel;
+    private JLabel imageLabel;
     private JButton setAreaButton;
     private String lastDetectionKey = "";
     private String lastDisplayKey = "";
@@ -217,6 +218,7 @@ public class PHANTAST_Live implements PlugIn {
     private ImagePlus liveMaskImp;
 
     // Detection cache, only touched by the detection worker
+    private ImagePlus dImp, vImp;
     private int dSlice = -1;
     private FloatProcessor dImage;
     private String dAdjustKey;
@@ -241,6 +243,17 @@ public class PHANTAST_Live implements PlugIn {
     private JComboBox<String> cArea, cStyle, cPreset;
     private JCheckBox bFlatten, bFillAll, bRound, bPreview, bLiveMask, bTable, bOutline, bMask, bAllSlices;
     private JLabel presetState;
+
+    // Batch tab
+    private JTextField batchFolder;
+    private JCheckBox bSubfolders, bSaveMasks, bSaveOutlines;
+    private JComboBox<String> cBatchPreset;
+    private JButton runBatchButton, stopBatchButton, openResultsButton;
+    private javax.swing.JProgressBar batchProgress;
+    private JLabel batchStatus;
+    private volatile boolean batchCancel;
+    private Thread batchThread;
+    private File lastBatchOutput;
     private boolean updatingControls;
     private String loadedPresetName = DEFAULT_PRESET;
     private String loadedPresetValues;
@@ -413,18 +426,14 @@ public class PHANTAST_Live implements PlugIn {
 
     @Override
     public void run(String arg) {
-        imp = IJ.getImage();
-        if (imp == null) return;
-        originalOverlay = imp.getOverlay();
-        originalRoi = imp.getRoi();
-        if (originalRoi != null && originalRoi.isArea()) {
-            areaRoi = (Roi) originalRoi.clone();
-            areaMode = AREA_SELECTION;
-        }
-
         // Macro / batch use: run directly with a saved preset, e.g. run("PHANTAST Live", "preset=[My cells]")
         String options = Macro.getOptions();
         if (options != null) {
+            imp = IJ.getImage(); // a macro needs an open image
+            if (imp == null) return;
+            originalOverlay = imp.getOverlay();
+            originalRoi = imp.getRoi();
+            if (originalRoi != null && originalRoi.isArea()) areaRoi = (Roi) originalRoi.clone();
             String name = Macro.getValue(options, "preset", DEFAULT_PRESET).trim();
             if (!DEFAULT_PRESET.equalsIgnoreCase(name)) {
                 String values = loadPresets().get(name);
@@ -438,17 +447,27 @@ public class PHANTAST_Live implements PlugIn {
             return;
         }
 
+        // The window opens with or without an image; an image can be opened later
+        final ImagePlus start = activeImage();
+        if (start != null && start.getRoi() != null && start.getRoi().isArea()) areaMode = AREA_SELECTION;
         try {
-            SwingUtilities.invokeAndWait(this::buildDialog);
+            SwingUtilities.invokeAndWait(() -> {
+                buildDialog();
+                attachImage(start);
+                placeDialog();
+                dialog.setVisible(true);
+            });
         } catch (Exception e) {
             IJ.handleException(e);
             return;
         }
+        ImagePlus.addImageListener(imageListener);
         try {
             closed.await();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
+        ImagePlus.removeImageListener(imageListener);
 
         detectGen.incrementAndGet(); // abandon any running preview
         displayGen.incrementAndGet();
@@ -457,13 +476,12 @@ public class PHANTAST_Live implements PlugIn {
         try {
             SwingUtilities.invokeAndWait(() -> {
                 closeLiveMask();
-                imp.setOverlay(originalOverlay);
-                if (originalRoi != null) imp.setRoi(originalRoi);
+                restoreImage();
             });
         } catch (Exception e) {
             IJ.handleException(e);
         }
-        if (!okPressed) return;
+        if (!okPressed || imp == null) return;
         try {
             finalRun();
         } catch (Throwable t) {
@@ -471,8 +489,203 @@ public class PHANTAST_Live implements PlugIn {
         }
     }
 
+    // ---------------------------------------------------------------- which image the window works on
+
+    /** Follows images being opened and closed while the window is open. */
+    private final ij.ImageListener imageListener = new ij.ImageListener() {
+        @Override
+        public void imageOpened(ImagePlus im) {
+            SwingUtilities.invokeLater(() -> {
+                if (dialog != null && imp == null && !isOwnWindow(im)) attachImage(im);
+            });
+        }
+
+        @Override
+        public void imageClosed(ImagePlus im) {
+            SwingUtilities.invokeLater(() -> {
+                if (dialog == null || im != imp) return;
+                imp = null; // closed: nothing to restore
+                ImagePlus next = activeImage();
+                attachImage(next == im ? null : next);
+            });
+        }
+
+        @Override
+        public void imageUpdated(ImagePlus im) {
+        }
+    };
+
+    /** The image in the front window, ignoring this plugin's own mask window. */
+    private ImagePlus activeImage() {
+        ImagePlus im = ij.WindowManager.getCurrentImage();
+        return im == null || isOwnWindow(im) ? null : im;
+    }
+
+    private boolean isOwnWindow(ImagePlus im) {
+        return im == liveMaskImp || (im.getTitle() != null && im.getTitle().endsWith(" - live mask"));
+    }
+
+    /** Puts the image back as it was (overlay and selection). */
+    private void restoreImage() {
+        if (imp == null) return;
+        imp.setOverlay(originalOverlay);
+        if (originalRoi != null) imp.setRoi(originalRoi);
+    }
+
+    /** Makes the window work on {@code im} (or on no image); drawn area and manual edits belong to one image. */
+    private void attachImage(ImagePlus im) {
+        if (im != null && im == imp) return;
+        restoreImage();
+        closeLiveMask();
+        imp = im;
+        edits.clear();
+        editVersion++;
+        areaRoi = null;
+        areaVersion++;
+        layerView = null; layerFill = null; layerOutline = null; layerArea = null; layerMask = null;
+        originalOverlay = null;
+        originalRoi = null;
+        if (imp != null) {
+            originalOverlay = imp.getOverlay();
+            originalRoi = imp.getRoi();
+            if (originalRoi != null && originalRoi.isArea()) {
+                areaRoi = (Roi) originalRoi.clone();
+                imp.deleteRoi(); // free the image selection for manual edits
+            }
+        }
+        if (imageLabel != null) {
+            imageLabel.setText(imp == null ? "Image: none open - open an image (File > Open) to see the live preview"
+                    : "Image: " + imp.getTitle() + (imp.getStackSize() > 1 ? "  (" + imp.getStackSize() + " slices)" : ""));
+            bAllSlices.setEnabled(imp != null && imp.getStackSize() > 1);
+            updateAreaLabel();
+            updateEditsLabel();
+        }
+        lastDetectionKey = detectionKey();
+        lastDisplayKey = display.key();
+        scheduleDetection();
+        scheduleDisplay();
+    }
+
+    private void useActiveImage() {
+        ImagePlus im = activeImage();
+        if (im == null) {
+            setStatus("No image open - open one with File > Open");
+        } else if (im == imp) {
+            setStatus("Already using " + im.getTitle());
+        } else {
+            attachImage(im);
+        }
+    }
+
+    // ---------------------------------------------------------------- batch tab
+
+    static final String BATCH_CURRENT = "Current settings (this window)";
+
+    private void refreshBatchPresets() {
+        if (cBatchPreset == null) return;
+        Object previous = cBatchPreset.getSelectedItem();
+        cBatchPreset.removeAllItems();
+        cBatchPreset.addItem(BATCH_CURRENT);
+        cBatchPreset.addItem(DEFAULT_PRESET);
+        for (String name : new TreeSet<>(loadPresets().keySet())) cBatchPreset.addItem(name);
+        if (previous != null) cBatchPreset.setSelectedItem(previous);
+    }
+
+    private void chooseBatchFolder() {
+        javax.swing.JFileChooser fc = new javax.swing.JFileChooser(batchFolder.getText().trim());
+        fc.setFileSelectionMode(javax.swing.JFileChooser.DIRECTORIES_ONLY);
+        fc.setDialogTitle("Choose the folder with your images");
+        if (fc.showOpenDialog(dialog) == javax.swing.JFileChooser.APPROVE_OPTION)
+            batchFolder.setText(fc.getSelectedFile().getAbsolutePath());
+    }
+
+    private void startBatch() {
+        if (batchThread != null) return;
+        File dir = new File(batchFolder.getText().trim());
+        if (batchFolder.getText().trim().isEmpty() || !dir.isDirectory()) {
+            batchStatus.setText("Choose a folder first");
+            return;
+        }
+        String choice = String.valueOf(cBatchPreset.getSelectedItem());
+        Map<String, String> settings;
+        if (BATCH_CURRENT.equals(choice)) {
+            settings = currentSettings();
+        } else if (DEFAULT_PRESET.equals(choice)) {
+            settings = defaultSettings();
+        } else {
+            String stored = loadPresets().get(choice);
+            if (stored == null) {
+                batchStatus.setText("Preset not found: " + choice);
+                return;
+            }
+            settings = parse(stored);
+        }
+        final Roi area = areaRoi == null ? null : (Roi) areaRoi.clone();
+        final boolean recurse = bSubfolders.isSelected(), masks = bSaveMasks.isSelected(),
+                outlines = bSaveOutlines.isSelected();
+        batchCancel = false;
+        runBatchButton.setEnabled(false);
+        stopBatchButton.setEnabled(true);
+        openResultsButton.setEnabled(false);
+        batchProgress.setValue(0);
+        batchProgress.setString("Starting...");
+        batchStatus.setText("Settings: " + choice);
+        batchThread = new Thread(() -> {
+            BatchResult r;
+            try {
+                r = runBatch(dir, recurse, settings, area, masks, outlines, () -> batchCancel,
+                        (done, total, message) -> SwingUtilities.invokeLater(() -> {
+                            batchProgress.setMaximum(total);
+                            batchProgress.setValue(done);
+                            batchProgress.setString(done + " / " + total + " images");
+                            batchStatus.setText(message);
+                        }));
+            } catch (Throwable t) {
+                r = new BatchResult();
+                r.error = "Batch failed: " + t;
+                IJ.log("PHANTAST Live batch error: " + t);
+            }
+            final BatchResult result = r;
+            SwingUtilities.invokeLater(() -> batchFinished(result));
+        }, "PHANTAST Live batch");
+        batchThread.setDaemon(true);
+        batchThread.start();
+    }
+
+    private void batchFinished(BatchResult r) {
+        batchThread = null;
+        if (runBatchButton == null) return;
+        runBatchButton.setEnabled(true);
+        stopBatchButton.setEnabled(false);
+        if (r.error != null) {
+            batchProgress.setString("");
+            batchStatus.setText("<html>" + r.error + "</html>");
+            return;
+        }
+        lastBatchOutput = r.outputDir;
+        openResultsButton.setEnabled(true);
+        batchProgress.setString((r.cancelled ? "Stopped: " : "Done: ") + r.images + " image(s)"
+                + (r.failed > 0 ? ", " + r.failed + " could not be read" : ""));
+        batchStatus.setText("Saved in " + r.outputDir.getName());
+        if (r.table != null && r.table.size() > 0) r.table.show("PHANTAST Batch Results");
+    }
+
+    private void openBatchResults() {
+        if (lastBatchOutput == null) return;
+        try {
+            java.awt.Desktop.getDesktop().open(lastBatchOutput);
+        } catch (Exception e) {
+            batchStatus.setText("Results are in " + lastBatchOutput.getAbsolutePath());
+        }
+    }
+
     private void finish(boolean ok) {
         if (dialog == null) return;
+        if (ok && imp == null) {
+            setStatus("Open an image to measure it (or use Cancel to close)");
+            return;
+        }
+        batchCancel = true; // a running batch stops after the current image
         okPressed = ok;
         dialog.dispose();
         dialog = null;
@@ -625,12 +838,6 @@ public class PHANTAST_Live implements PlugIn {
     /** Builds and shows the settings window, then starts the live preview; runs on the event thread. */
     void buildDialog() {
         createDialog();
-        dialog.setVisible(true);
-        if (areaRoi != null) imp.deleteRoi(); // free the image selection for manual edits
-        lastDetectionKey = detectionKey();
-        lastDisplayKey = display.key();
-        scheduleDetection();
-        scheduleDisplay();
     }
 
     /** Builds the settings window without showing it. */
@@ -727,8 +934,46 @@ public class PHANTAST_Live implements PlugIn {
         bOutline = checkbox("Draw yellow cell outline on image", outputOutline);
         bMask = checkbox("Create black & white mask image", outputMask);
         bAllSlices = checkbox("Process all slices of the stack", allSlices);
-        bAllSlices.setEnabled(imp.getStackSize() > 1);
+        bAllSlices.setEnabled(imp != null && imp.getStackSize() > 1);
         for (JCheckBox b : new JCheckBox[] {bTable, bOutline, bMask, bAllSlices}) output.full(b);
+
+        // 6. Batch process (not part of presets)
+        Form batch = new Form();
+        batchFolder = new JTextField(22);
+        JPanel folderRow = new JPanel(new BorderLayout(6, 0));
+        folderRow.add(batchFolder, BorderLayout.CENTER);
+        folderRow.add(button("Choose...", this::chooseBatchFolder), BorderLayout.EAST);
+        batch.labelled("Folder", folderRow);
+        bSubfolders = new JCheckBox("Include subfolders");
+        batch.full(bSubfolders);
+        cBatchPreset = new JComboBox<>();
+        refreshBatchPresets();
+        batch.labelled("Settings", cBatchPreset);
+        bSaveMasks = new JCheckBox("Save a black & white mask for each image", true);
+        bSaveOutlines = new JCheckBox("Save each image with the yellow cell outline", true);
+        batch.full(bSaveMasks);
+        batch.full(bSaveOutlines);
+        JPanel batchButtons = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        runBatchButton = button("Run batch", this::startBatch);
+        stopBatchButton = button("Stop", () -> batchCancel = true);
+        stopBatchButton.setEnabled(false);
+        openResultsButton = button("Open results folder", this::openBatchResults);
+        openResultsButton.setEnabled(false);
+        batchButtons.add(runBatchButton);
+        batchButtons.add(Box.createHorizontalStrut(6));
+        batchButtons.add(stopBatchButton);
+        batchButtons.add(Box.createHorizontalStrut(6));
+        batchButtons.add(openResultsButton);
+        batch.full(batchButtons);
+        batchProgress = new javax.swing.JProgressBar(0, 1);
+        batchProgress.setStringPainted(true);
+        batchProgress.setString("");
+        batch.full(batchProgress);
+        batchStatus = new JLabel(" ");
+        batch.full(batchStatus);
+        batch.full(help("Every image in the folder is analysed with the chosen settings (manual corrections are not "
+                + "used). Results are saved in a new folder <i>PHANTAST_Live_results_&lt;date&gt;</i> inside it: "
+                + "<i>confluency_results.csv</i>, <i>settings_used.txt</i>, and the masks / outline images."));
 
         JTabbedPane tabs = new JTabbedPane();
         tabs.setTabLayoutPolicy(JTabbedPane.SCROLL_TAB_LAYOUT); // one row; never reshuffles on click
@@ -737,6 +982,7 @@ public class PHANTAST_Live implements PlugIn {
         tabs.addTab("3. Cell detection", detect.done());
         tabs.addTab("4. Manual correction", manual.done());
         tabs.addTab("5. Output", output.done());
+        tabs.addTab("6. Batch process", batch.done());
         tabs.addChangeListener(e -> {
             onAdjustTab = tabs.getSelectedIndex() == ADJUST_TAB;
             rebuildOverlay();
@@ -780,7 +1026,14 @@ public class PHANTAST_Live implements PlugIn {
 
         JPanel root = new JPanel(new BorderLayout(0, 8));
         root.setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
-        root.add(presetBar, BorderLayout.NORTH);
+        imageLabel = new JLabel("Image: none open");
+        JPanel imageBar = new JPanel(new BorderLayout(8, 0));
+        imageBar.add(imageLabel, BorderLayout.CENTER);
+        imageBar.add(button("Use active image", this::useActiveImage), BorderLayout.EAST);
+        JPanel topBars = new JPanel(new BorderLayout(0, 6));
+        topBars.add(imageBar, BorderLayout.NORTH);
+        topBars.add(presetBar, BorderLayout.SOUTH);
+        root.add(topBars, BorderLayout.NORTH);
         root.add(tabs, BorderLayout.CENTER);
         root.add(bottom, BorderLayout.SOUTH);
 
@@ -820,7 +1073,7 @@ public class PHANTAST_Live implements PlugIn {
         Rectangle screen = java.awt.GraphicsEnvironment.getLocalGraphicsEnvironment().getMaximumWindowBounds();
         Dimension size = dialog.getSize();
         int x = screen.x + (screen.width - size.width) / 2, y = screen.y + (screen.height - size.height) / 2;
-        if (imp.getWindow() != null) {
+        if (imp != null && imp.getWindow() != null) {
             Rectangle win = imp.getWindow().getBounds();
             x = win.x + win.width + 8;
             y = win.y;
@@ -878,7 +1131,7 @@ public class PHANTAST_Live implements PlugIn {
             bTable.setSelected(outputTable);
             bOutline.setSelected(outputOutline);
             bMask.setSelected(outputMask);
-            bAllSlices.setSelected(allSlices && imp.getStackSize() > 1);
+            bAllSlices.setSelected(allSlices);
         } finally {
             updatingControls = false;
         }
@@ -932,6 +1185,10 @@ public class PHANTAST_Live implements PlugIn {
     }
 
     private void addEdit(boolean add) {
+        if (imp == null) {
+            setStatus("Open an image first");
+            return;
+        }
         Roi roi = imp.getRoi();
         if (roi == null || !roi.isArea()) {
             setStatus("Draw a selection on the image first (e.g. freehand or oval tool)");
@@ -961,6 +1218,10 @@ public class PHANTAST_Live implements PlugIn {
     }
 
     private void setAreaFromSelection() {
+        if (imp == null) {
+            setStatus("Open an image first");
+            return;
+        }
         Roi roi = imp.getRoi();
         if (roi == null || !roi.isArea()) {
             setStatus("Draw the analysis area on the image first (e.g. oval tool)");
@@ -1104,6 +1365,7 @@ public class PHANTAST_Live implements PlugIn {
         } finally {
             updatingControls = false;
         }
+        refreshBatchPresets();
     }
 
     private void updatePresetState() {
@@ -1247,13 +1509,18 @@ public class PHANTAST_Live implements PlugIn {
 
     private void scheduleDisplay() {
         final int g = displayGen.incrementAndGet();
+        final ImagePlus target = imp;
+        if (target == null) {
+            layerView = null;
+            return;
+        }
         final Display d = display;
-        final int slice = imp.getCurrentSlice();
+        final int slice = target.getCurrentSlice();
         final BooleanSupplier stale = () -> displayGen.get() != g;
         displayWorker.submit(() -> {
             if (stale.getAsBoolean()) return;
             try {
-                ImageRoi view = renderDisplay(slice, d, stale);
+                ImageRoi view = renderDisplay(target, slice, d, stale);
                 if (stale.getAsBoolean()) return;
                 layerView = view;
                 EventQueue.invokeLater(this::rebuildOverlay);
@@ -1270,6 +1537,12 @@ public class PHANTAST_Live implements PlugIn {
 
     private void scheduleDetection() {
         final int g = detectGen.incrementAndGet();
+        final ImagePlus target = imp;
+        if (target == null) {
+            layerFill = null; layerOutline = null; layerArea = null; layerMask = null;
+            setStatus("Confluency: open an image to see it");
+            return;
+        }
         if (!preview) {
             layerFill = null; layerOutline = null; layerArea = null; layerMask = null;
             setStatus("Confluency: (turn on Live preview)");
@@ -1283,9 +1556,9 @@ public class PHANTAST_Live implements PlugIn {
         final Display adj = applied;
         final int mode = areaMode, mg = margin;
         final Roi area = areaRoi;
-        final int slice = imp.getCurrentSlice();
+        final int slice = target.getCurrentSlice();
         final List<Edit> sliceEdits = editsFor(slice);
-        final boolean stack = imp.getStackSize() > 1;
+        final boolean stack = target.getStackSize() > 1;
         final BooleanSupplier stale = () -> detectGen.get() != g;
         detectWorker.submit(() -> {
             try {
@@ -1295,7 +1568,7 @@ public class PHANTAST_Live implements PlugIn {
             }
             if (stale.getAsBoolean()) return;
             try {
-                Detection det = detectPreview(slice, adj, s, p, mode, mg, area, sliceEdits, stale);
+                Detection det = detectPreview(target, slice, adj, s, p, mode, mg, area, sliceEdits, stale);
                 if (det.area.error != null) {
                     if (stale.getAsBoolean()) return;
                     layerFill = null; layerOutline = null; layerArea = null; layerMask = null;
@@ -1345,21 +1618,24 @@ public class PHANTAST_Live implements PlugIn {
 
     private List<Edit> editsFor(int slice) {
         List<Edit> out = new ArrayList<>();
-        for (Edit e : edits) if (e.slice == slice || imp.getStackSize() == 1) out.add(e);
+        boolean single = imp == null || imp.getStackSize() == 1;
+        for (Edit e : edits) if (e.slice == slice || single) out.add(e);
         return out;
     }
 
     /** Detection for the preview, reusing cached steps when only some settings changed. */
-    private Detection detectPreview(int slice, Display adj, double s, Params p, int mode, int mg, Roi areaSel,
-                                    List<Edit> sliceEdits, BooleanSupplier stale) {
-        if (slice != dSlice || dImage == null) {
-            dImage = toFloat(imp.getStack().getProcessor(slice));
+    private Detection detectPreview(ImagePlus target, int slice, Display adj, double s, Params p, int mode, int mg,
+                                    Roi areaSel, List<Edit> sliceEdits, BooleanSupplier stale) {
+        if (target != dImp || slice != dSlice || dImage == null) {
+            dImage = toFloat(target.getStack().getProcessor(slice));
+            dImp = target;
             dSlice = slice;
             dAdjustKey = null;
+            dInput = null;
             dAutoArea = null;
         }
         if (dInput == null || !adj.key().equals(dAdjustKey)) {
-            dInput = detectionInput(imp, imp.getStack().getProcessor(slice), adj);
+            dInput = detectionInput(target, target.getStack().getProcessor(slice), adj);
             dAdjustKey = adj.key();
             dSigma = Double.NaN;
             dContrast = null;
@@ -1391,6 +1667,10 @@ public class PHANTAST_Live implements PlugIn {
 
     /** Draws all current layers on the image; runs on the event thread. */
     private void rebuildOverlay() {
+        if (imp == null) {
+            closeLiveMask();
+            return;
+        }
         Overlay ov = originalOverlay == null ? new Overlay() : originalOverlay.duplicate();
         ImageRoi view = layerView;
         if (view != null) {
@@ -1433,10 +1713,11 @@ public class PHANTAST_Live implements PlugIn {
     }
 
     /** Builds the adjusted greyscale view; only the per-pixel pass runs when a fast slider moves. */
-    private ImageRoi renderDisplay(int slice, Display d, BooleanSupplier stale) {
+    private ImageRoi renderDisplay(ImagePlus target, int slice, Display d, BooleanSupplier stale) {
         if (d.neutral()) return null;
-        if (slice != vSlice || vRaw == null) {
-            vRaw = displayFloat(imp, imp.getStack().getProcessor(slice));
+        if (target != vImp || slice != vSlice || vRaw == null) {
+            vRaw = displayFloat(target, target.getStack().getProcessor(slice));
+            vImp = target;
             vSlice = slice;
             vBaseKey = null;
         }
@@ -1632,38 +1913,20 @@ public class PHANTAST_Live implements PlugIn {
             int s = slices[i];
             IJ.showStatus("PHANTAST: image " + (i + 1) + "/" + slices.length);
             IJ.showProgress(i, slices.length);
-            FloatProcessor img = toFloat(imp.getStack().getProcessor(s));
-            Area area = buildArea(areaMode, areaRoi, img, margin);
-            if (area.error != null) {
-                IJ.log("PHANTAST Live, slice " + s + ": " + area.error);
+            List<Edit> sliceEdits = editsFor(s);
+            Measurement r = measure(imp, s, areaRoi, sliceEdits);
+            if (r.area.error != null) {
+                IJ.log("PHANTAST Live, slice " + s + ": " + r.area.error);
                 continue;
             }
-            FloatProcessor input = detectionInput(imp, imp.getStack().getProcessor(s), applied);
-            float[] lc = localContrast(input, sigma);
-            byte[] dir = params.haloDepth > 0 ? directions(input) : null;
-            List<Edit> sliceEdits = editsFor(s);
-            ByteProcessor mask = segment(lc, dir, (float[]) img.getPixels(), img.getWidth(), img.getHeight(),
-                    params, area.mask, sliceEdits, () -> false);
-            last = confluency(mask, area.mask);
-
+            ByteProcessor mask = r.mask;
+            Area area = r.area;
+            last = r.confluency;
             if (rt != null) {
                 rt.incrementCounter();
                 rt.addValue("Image", imp.getTitle());
                 if (n > 1) rt.addValue("Slice", s);
-                rt.addValue("Confluency (%)", last);
-                rt.addValue("Analysis area", areaMode == AREA_WHOLE ? "Whole image"
-                        : areaMode == AREA_SELECTION ? "Selection" : "Auto circle");
-                rt.addValue("Area (px)", area.mask == null ? (double) img.getWidth() * img.getHeight() : count(area.mask));
-                rt.addValue("Sigma", sigma);
-                rt.addValue("Epsilon", params.epsilon);
-                rt.addValue("Halo correction", params.haloDepth == 0 ? "Off"
-                        : params.haloDepth >= HALO_FULL ? "Full" : params.haloDepth + " px");
-                rt.addValue("Min cell size (px)", params.minSize);
-                rt.addValue("Fill holes", params.fillAll ? "All" : params.maxHole + " px");
-                rt.addValue("Grow/shrink (px)", params.grow);
-                rt.addValue("Exclude round bright", params.excludeRound ? "Yes" : "No");
-                rt.addValue("Manual edits", sliceEdits.size());
-                rt.addValue("Image adjustments", applied.describe());
+                addSettingsColumns(rt, r, sliceEdits.size());
             }
             if (ov != null) {
                 Roi roi = selection(mask);
@@ -1689,6 +1952,212 @@ public class PHANTAST_Live implements PlugIn {
         if (maskStack != null && maskStack.getSize() > 0)
             new ImagePlus(imp.getShortTitle() + " - mask", maskStack).show();
         IJ.showStatus(String.format("PHANTAST: confluency %.1f %%", last));
+    }
+
+    // ---------------------------------------------------------------- measurement (shared by OK and batch)
+
+    /** Detection result for one image or slice. */
+    static final class Measurement {
+        final ByteProcessor mask;
+        final double confluency;
+        final Area area;
+        final long areaPixels;
+        Measurement(ByteProcessor mask, double confluency, Area area, long areaPixels) {
+            this.mask = mask;
+            this.confluency = confluency;
+            this.area = area;
+            this.areaPixels = areaPixels;
+        }
+    }
+
+    /** Runs the full detection with this instance's settings on one slice of an image. */
+    Measurement measure(ImagePlus im, int slice, Roi areaSel, List<Edit> sliceEdits) {
+        ImageProcessor ip = im.getStack().getProcessor(slice);
+        FloatProcessor img = toFloat(ip);
+        int w = img.getWidth(), h = img.getHeight();
+        Area area = buildArea(areaMode, areaSel, img, margin);
+        if (area.error != null) return new Measurement(null, 0, area, 0);
+        FloatProcessor input = detectionInput(im, ip, applied);
+        float[] lc = localContrast(input, sigma);
+        byte[] dir = params.haloDepth > 0 ? directions(input) : null;
+        ByteProcessor mask = segment(lc, dir, (float[]) img.getPixels(), w, h, params, area.mask, sliceEdits, () -> false);
+        long areaPixels = area.mask == null ? (long) w * h : count(area.mask);
+        return new Measurement(mask, confluency(mask, area.mask), area, areaPixels);
+    }
+
+    /** Confluency and every setting used, so each row can be reported and reproduced. */
+    void addSettingsColumns(ResultsTable rt, Measurement r, int manualEdits) {
+        rt.addValue("Confluency (%)", r.confluency);
+        rt.addValue("Analysis area", areaMode == AREA_WHOLE ? "Whole image"
+                : areaMode == AREA_SELECTION ? "Selection" : "Auto circle");
+        rt.addValue("Area (px)", r.areaPixels);
+        rt.addValue("Sigma", sigma);
+        rt.addValue("Epsilon", params.epsilon);
+        rt.addValue("Halo correction", params.haloDepth == 0 ? "Off"
+                : params.haloDepth >= HALO_FULL ? "Full" : params.haloDepth + " px");
+        rt.addValue("Min cell size (px)", params.minSize);
+        rt.addValue("Fill holes", params.fillAll ? "All" : params.maxHole + " px");
+        rt.addValue("Grow/shrink (px)", params.grow);
+        rt.addValue("Exclude round bright", params.excludeRound ? "Yes" : "No");
+        rt.addValue("Manual edits", manualEdits);
+        rt.addValue("Image adjustments", applied.describe());
+    }
+
+    /** The image as displayed, with the cell outline in yellow and the analysis area in cyan. */
+    static ColorProcessor outlineImage(ImagePlus im, int slice, Measurement r) {
+        FloatProcessor view = displayFloat(im, im.getStack().getProcessor(slice));
+        float[] v = (float[]) view.getPixels();
+        byte[] b = new byte[v.length];
+        for (int i = 0; i < v.length; i++) b[i] = (byte) Math.round(v[i] * 255);
+        ColorProcessor cp = (ColorProcessor) new ByteProcessor(view.getWidth(), view.getHeight(), b).convertToRGB();
+        Roi cells = selection(r.mask);
+        int width = Math.max(1, Math.max(cp.getWidth(), cp.getHeight()) / 1000);
+        if (cells != null) {
+            cp.setColor(CELL_OUTLINE);
+            cp.setLineWidth(width);
+            cp.draw(cells);
+        }
+        if (r.area.outline != null) {
+            cp.setColor(AREA_OUTLINE);
+            cp.setLineWidth(width + 1);
+            cp.draw(r.area.outline);
+        }
+        return cp;
+    }
+
+    // ---------------------------------------------------------------- batch processing
+
+    static final String[] IMAGE_EXTENSIONS = {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp", ".gif"};
+    static final String RESULTS_PREFIX = "PHANTAST_Live_results_";
+
+    interface BatchProgress {
+        void update(int done, int total, String message);
+    }
+
+    static final class BatchResult {
+        File outputDir;
+        ResultsTable table;
+        int images, failed;
+        boolean cancelled;
+        String error;
+    }
+
+    /** Image files in a folder (optionally its subfolders), skipping earlier result folders. */
+    static List<File> findImages(File dir, boolean recurse) {
+        List<File> out = new ArrayList<>();
+        File[] entries = dir.listFiles();
+        if (entries == null) return out;
+        Arrays.sort(entries);
+        for (File f : entries) {
+            if (f.isDirectory()) {
+                if (recurse && !f.getName().startsWith(RESULTS_PREFIX)) out.addAll(findImages(f, true));
+            } else {
+                String name = f.getName().toLowerCase();
+                if (name.startsWith(".")) continue;
+                for (String ext : IMAGE_EXTENSIONS) {
+                    if (name.endsWith(ext)) {
+                        out.add(f);
+                        break;
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Analyses every image in {@code dir} with the given settings and saves a results CSV
+     * (plus optional masks and outline images) in a new results folder inside {@code dir}.
+     */
+    static BatchResult runBatch(File dir, boolean recurse, Map<String, String> settings, Roi areaSel,
+                                boolean saveMasks, boolean saveOutlines, BooleanSupplier cancelled,
+                                BatchProgress progress) {
+        BatchResult res = new BatchResult();
+        PHANTAST_Live b = new PHANTAST_Live();
+        b.fieldsFromMap(settings);
+        if (b.areaMode == AREA_SELECTION && (areaSel == null || !areaSel.isArea())) {
+            res.error = "These settings use 'Selection drawn on image' but no area is set. "
+                    + "Set the area in tab 1, or use Whole image / Auto-detect.";
+            return res;
+        }
+        List<File> files = findImages(dir, recurse);
+        if (files.isEmpty()) {
+            res.error = "No images (" + String.join(", ", IMAGE_EXTENSIONS) + ") found in " + dir;
+            return res;
+        }
+        String stamp = new java.text.SimpleDateFormat("yyyyMMdd_HHmmss").format(new java.util.Date());
+        File out = new File(dir, RESULTS_PREFIX + stamp);
+        File maskDir = new File(out, "masks"), outlineDir = new File(out, "outlines");
+        if (!out.mkdirs() || (saveMasks && !maskDir.mkdirs()) || (saveOutlines && !outlineDir.mkdirs())) {
+            res.error = "Could not create the results folder " + out;
+            return res;
+        }
+        ResultsTable rt = new ResultsTable();
+        rt.showRowNumbers(false);
+        rt.setNaNEmptyCells(true); // rows for unreadable files must not look like 0 % confluency
+        String base = dir.getAbsolutePath();
+
+        for (int i = 0; i < files.size(); i++) {
+            if (cancelled.getAsBoolean()) {
+                res.cancelled = true;
+                break;
+            }
+            File f = files.get(i);
+            String rel = f.getAbsolutePath().substring(base.length()).replaceFirst("^[\\\\/]+", "");
+            progress.update(i, files.size(), rel);
+            try {
+                ImagePlus im = IJ.openImage(f.getPath());
+                if (im == null) throw new IllegalStateException("could not open this file as an image");
+                int n = im.getStackSize();
+                String stem = rel.replaceAll("[\\\\/]", "_").replaceFirst("\\.[^.]+$", "");
+                for (int s = 1; s <= n; s++) {
+                    Measurement r = b.measure(im, s, areaSel, new ArrayList<>());
+                    rt.incrementCounter();
+                    rt.addValue("File", rel);
+                    rt.addValue("Slice", s);
+                    if (r.area.error != null) {
+                        rt.addValue("Note", r.area.error);
+                        continue;
+                    }
+                    b.addSettingsColumns(rt, r, 0);
+                    rt.addValue("Note", "");
+                    String name = n > 1 ? stem + "_slice" + s : stem;
+                    if (saveMasks)
+                        new ij.io.FileSaver(new ImagePlus(name, r.mask)).saveAsPng(new File(maskDir, name + "_mask.png").getPath());
+                    if (saveOutlines)
+                        new ij.io.FileSaver(new ImagePlus(name, outlineImage(im, s, r)))
+                                .saveAsPng(new File(outlineDir, name + "_outline.png").getPath());
+                }
+                im.flush();
+                res.images++;
+            } catch (Throwable t) {
+                res.failed++;
+                rt.incrementCounter();
+                rt.addValue("File", rel);
+                rt.addValue("Note", "Error: " + t.getMessage());
+            }
+        }
+        progress.update(res.images + res.failed, files.size(), res.cancelled ? "Stopped" : "Saving results");
+
+        try {
+            rt.saveAs(new File(out, "confluency_results.csv").getPath());
+        } catch (java.io.IOException e) {
+            res.error = "Could not save confluency_results.csv: " + e.getMessage();
+        }
+        List<String> lines = new ArrayList<>();
+        lines.add("PHANTAST Live batch settings");
+        lines.add("Folder: " + dir.getAbsolutePath());
+        lines.add("Images analysed: " + res.images + ", failed: " + res.failed + (res.cancelled ? " (stopped early)" : ""));
+        for (Map.Entry<String, String> e : b.currentSettings().entrySet()) lines.add(e.getKey() + " = " + e.getValue());
+        try {
+            java.nio.file.Files.write(new File(out, "settings_used.txt").toPath(), lines,
+                    java.nio.charset.StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            IJ.log("PHANTAST Live: could not write settings_used.txt: " + e);
+        }
+        res.outputDir = out;
+        res.table = rt;
+        return res;
     }
 
     static Roi selection(ByteProcessor mask) {

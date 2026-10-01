@@ -1,21 +1,21 @@
 # PHANTAST Live — interactive confluency measurement for Fiji
 
-**PHANTAST Live** is a Fiji/ImageJ plugin that measures **cell confluency in phase-contrast microscopy images**, with a live preview, image adjustments, analysis-area selection and manual corrections.
+**PHANTAST Live** is a Fiji/ImageJ plugin that measures **cell confluency in phase-contrast microscopy images**, with a live preview, image adjustments, analysis-area selection, manual corrections, saved presets and batch processing of whole folders.
 
 It is based on the original [PHANTAST for FIJI](https://github.com/nicjac/PHANTAST-FIJI) by Nicolas Jaccard (UCL) and uses the same segmentation method (local contrast thresholding with halo correction, Jaccard *et al.*, 2014), re-implemented with an interactive interface. The original PHANTAST plugin code is kept unchanged in this repository.
 
 ## Download and install
 
-1. Download **`PHANTAST_Live-1.0.jar`** from the [latest release](https://github.com/a-LittleMonk/PHANTAST-FIJI/releases/latest).
-2. Copy it into the **`plugins`** folder of your Fiji installation (or drag it onto the Fiji toolbar and save it in `plugins`).
+1. Download **`PHANTAST_Live-1.1.jar`** from the [latest release](https://github.com/a-LittleMonk/PHANTAST-FIJI/releases/latest).
+2. Copy it into the **`plugins`** folder of your Fiji installation (or drag it onto the Fiji toolbar and save it in `plugins`). **If you are updating, delete the older `PHANTAST_Live-*.jar` from `plugins` first** — two versions side by side conflict.
 3. Restart Fiji.
-4. Open an image and run **Plugins › Segmentation › PHANTAST Live**.
+4. Run **Plugins › Segmentation › PHANTAST Live**. The window opens with or without an image; open an image at any time and it is picked up automatically.
 
 Requires **Fiji** (or ImageJ 1.54 or newer). It works on 8-bit, 16-bit, 32-bit and RGB images, single images and stacks. PHANTAST Live can be installed next to the original PHANTAST plugin; they do not interfere.
 
 ## How to use it
 
-The settings window has a preset bar at the top, five tabs in workflow order, and the live **confluency** at the bottom.
+The settings window shows which **image** it works on (with a *Use active image* button to switch), a preset bar, six tabs in workflow order, and the live **confluency** at the bottom.
 
 | Tab | What you do there |
 | --- | --- |
@@ -24,12 +24,13 @@ The settings window has a preset bar at the top, five tabs in workflow order, an
 | **3. Cell detection** | Live preview options (yellow outline, green fill, live black & white mask window), then **sigma** and **epsilon** (the PHANTAST parameters), halo correction strength, minimum cell size, hole filling, grow/shrink, and *exclude round bright cells*. |
 | **4. Manual correction** | Draw a selection on the image and press **Add selection to cells** or **Remove selection**; undo or clear edits. |
 | **5. Output** | What happens when you click **OK**: add a row to the Results table, draw the yellow cell outline on the image, create a black & white mask, process all slices of a stack. |
+| **6. Batch process** | Choose a **folder** (optionally with subfolders) and **settings** (current window settings, Default or a saved preset), then **Run batch**. Every image is analysed and the results are saved in a new folder `PHANTAST_Live_results_<date>` inside it: `confluency_results.csv`, `settings_used.txt`, and optionally a black & white mask and an outline image per photo. Stacks give one row per slice; unreadable files are listed with a note and skipped. |
 
 **Presets:** the plugin always opens on **Default**. Change any settings and press **Save preset** to store them under a name. When a saved preset is selected and modified, *Save preset* asks whether to **update the preset**, **save a new preset** or **cancel**. Presets are stored in the ImageJ preferences folder (`PHANTAST_Live_presets.properties`).
 
 **Results table:** each row records the image, confluency (%), analysis area and its size, and every setting used (sigma, epsilon, halo correction, size and hole limits, grow/shrink, round-cell exclusion, number of manual edits and any image adjustments applied to detection), so results can be reported and reproduced.
 
-**Batch / macro use:** run the plugin with a saved preset without opening the window:
+**Macro use:** for your own macros, run the plugin on the open image with a saved preset, without opening the window:
 
 ```
 run("PHANTAST Live", "preset=[My preset]");
@@ -48,7 +49,7 @@ The plugin is a single Java file, [`PHANTAST_Live/src/PHANTAST_Live.java`](PHANT
 * **Windows:** `PHANTAST_Live\build.bat "C:\path\to\Fiji"`
 * **macOS / Linux** (needs `javac` 8+ on the PATH): `./PHANTAST_Live/build.sh /path/to/Fiji.app`
 
-This creates `PHANTAST_Live/PHANTAST_Live-1.0.jar`. The source code is also included inside the released jar.
+This creates `PHANTAST_Live/PHANTAST_Live-1.1.jar`. The source code is also included inside the released jar.
 
 ## Repository layout
 
@@ -72,4 +73,4 @@ PHANTAST Live is a modified version of PHANTAST for FIJI and is distributed unde
 
 * Original PHANTAST and PHANTAST for FIJI: Nicolas Jaccard, Department of Biochemical Engineering, UCL — <https://github.com/nicjac/PHANTAST-FIJI>
 * 2017 FIJI plugin improvements: Olivier Burri, BIOP, EPFL
-* PHANTAST Live (interactive interface, image adjustments, analysis areas, presets, manual corrections): a-LittleMonk
+* PHANTAST Live (interactive interface, image adjustments, analysis areas, presets, manual corrections, batch processing): a-LittleMonk

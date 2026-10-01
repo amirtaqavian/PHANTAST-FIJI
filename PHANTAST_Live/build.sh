@@ -1,5 +1,5 @@
 #!/bin/sh
-# Builds PHANTAST_Live-1.0.jar against the ImageJ library of a Fiji installation.
+# Builds PHANTAST_Live-1.1.jar against the ImageJ library of a Fiji installation.
 # Needs a Java compiler (javac, version 8 or newer) on the PATH.
 # Usage:  ./build.sh /path/to/Fiji.app
 set -e
@@ -24,7 +24,7 @@ mkdir -p "$OUT"
 javac --release 8 -Xlint:-options -cp "$IJJAR" -d "$OUT" "$HERE/src/PHANTAST_Live.java"
 cp "$HERE/plugins.config" "$HERE/src/PHANTAST_Live.java" "$OUT/"
 [ -f "$HERE/../LICENSE" ] && cp "$HERE/../LICENSE" "$OUT/LICENSE.txt"
-jar cf "$HERE/PHANTAST_Live-1.0.jar" -C "$OUT" .
+jar cf "$HERE/PHANTAST_Live-1.1.jar" -C "$OUT" .
 
-echo "Built $HERE/PHANTAST_Live-1.0.jar"
+echo "Built $HERE/PHANTAST_Live-1.1.jar"
 echo "Copy it into $FIJI/plugins and restart Fiji."
